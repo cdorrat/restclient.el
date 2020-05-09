@@ -22,6 +22,20 @@
 ;;
 (require 'jq-mode)
 
+(defvar rctest-output-buffer-name "*RestClient run all*"
+  "The name fo the output buffer with run all results")
+
+
+(defun rctest--request-props ()
+  "Get an alist of all the 'Tag: value' entries on comments preceeding point"
+  (save-excursion
+    (let ((end (point))
+	  props)
+      (backward-sentence)
+      (while (re-search-forward "^# \\([^:\n]+\\): \\(.+?\\)$" end t)
+	(map-put props (intern (downcase (match-string-no-properties 1))) (match-string-no-properties 2)))
+      props)))
+
 (defun rctest--all-request-pos ()
   (save-excursion
     (goto-char (point-min))
@@ -33,17 +47,20 @@
       (nreverse matches))))
 
 (defun rctest--new--request-data (buffer a-pos)
-  (let (request-data)
-    (map-put rctest-current-test 'buffer buffer)
-    (map-put rctest-current-test 'pos a-pos)
-    (map-put rctest-current-test 'name
-	     (save-excursion
-	       (goto-char a-pos)
-	       (buffer-substring-no-properties (line-beginning-position) (- (line-beginning-position 2) 1))))))
+  (let* ((req-props (rctest--request-props))
+	 (req-url (save-excursion
+		    (goto-char a-pos)
+		    (buffer-substring-no-properties (line-beginning-position) (- (line-beginning-position 2) 1))))
+	 request-data)
+    (map-put request-data 'buffer buffer)
+    (map-put request-data 'pos a-pos)
+    (map-put request-data 'name (or (cdr (assoc 'name req-props)) req-url))
+    (map-put request-data 'request req-url)
+    request-data))
 
 (defun rctest--update-data-on-start (a-request)
-  (map-put a-request 'request-headers (format "%s" url-request-extra-headers))
-  (map-put a-request 'request-body (format "%s" url-request-data))  
+  (map-put a-request 'request-headers headers) ;; var bound in restclient-http-do
+  (map-put a-request 'request-body url-request-data)  
   (map-put a-request 'status 'sending)
   a-request)
 
@@ -56,6 +73,40 @@
    (while restclient-within-call
      (sit-for 0.05)))
 
+
+(defun rctest--init-output-buffer (num-requests)
+  (save-excursion    
+    (with-current-buffer (get-buffer-create rctest-output-buffer-name)
+      (erase-buffer)
+      (goto-char (point-min))
+      (insert (format "Restclient run all output [0/%d]\n" num-requests))
+      (org-mode))
+    (display-buffer rctest-output-buffer-name t)))
+
+(defun rctest--inc-completed-requests ()
+  (with-current-buffer rctest-output-buffer-name
+    (goto-char (point-min))
+    (and (re-search-forward "\\[\\([0-9]+\\)/[0-9]+\\]" (line-end-position 2))
+	 (replace-match (number-to-string (+ 1 (string-to-number (match-string-no-properties 1)))) nil nil nil 1))))
+
+(defun rctest--display-result (request-data)
+  (cl-flet ((r-data (k) (cdr (assoc k request-data))))
+   (with-current-buffer rctest-output-buffer-name
+     (goto-char (point-max))
+     (insert (format "\n* %s\n" (r-data 'name)))
+
+     (insert "** Request\n")
+     (insert (r-data 'request) "\n")
+     (when-let ((hdrs (r-data 'request-headers)))
+       (dolist (h hdrs)
+	 (insert (car h) ": " (cdr h) "\n")))
+     
+     (when-let ((r-body (r-data 'request-body)))       
+       (insert "\n" r-body))
+     
+     (insert "** Response\n" (r-data 'response-body))
+     (outline-hide-sublevels 1))))
+
 (defun rctest-run-all ()
   (interactive)
   (let* ((request-positions (rctest--all-request-pos))
@@ -67,17 +118,18 @@
 	 (end-lambda (lambda ()
 		       (setq request-data (rctest--update-data-on-end request-data)))))
     (add-hook 'restclient-http-do-hook start-lambda)
-    (add-hook 'restclient-response-loaded-hook end-lambda)
-    
+    (add-hook 'restclient-response-received-hook end-lambda)
+
+    (rctest--init-output-buffer (length request-positions))
     (dolist (req-pos request-positions)
       (goto-char req-pos)
       (setq request-data (rctest--new--request-data (current-buffer) req-pos))
       (rctest--http-send-current-sync)
-      ;; update output buffer
-      )
+      (rctest--display-result request-data)
+      (rctest--inc-completed-requests))
     
     (remove-hook 'restclient-http-do-hook start-lambda)
-    (remove-hook 'restclient-response-loaded-hook end-lambda)
+    (remove-hook 'restclient-response-received-hook end-lambda)
     nil))
 
 ;; (defvar mtest)
@@ -89,11 +141,11 @@
 
 (provide 'restclient-testing)
 
-;; (eval-after-load 'restclient
-;;   '(progn
-;;      (resetclient-register-result-func
-;;       "jq-set-var" #'restclient-json-var-function
-;;       "Set a resetclient variable with the value jq expression, 
-;;        takes var & jq expression as args. 
-;;        eg. -> jq-set-var :my-token .token")
-;;      (define-key restclient-response-mode-map  (kbd "C-c C-j") #'restclient-jq-interactive-result)))
+(eval-after-load 'restclient
+  '(progn
+     ;; (resetclient-register-result-func
+     ;;  "jq-set-var" #'restclient-json-var-function
+     ;;  "Set a resetclient variable with the value jq expression, 
+     ;;   takes var & jq expression as args. 
+     ;;   eg. -> jq-set-var :my-token .token")
+     (define-key restclient-response-mode-map  (kbd "C-c C-r") #'rctest-run-all)))
