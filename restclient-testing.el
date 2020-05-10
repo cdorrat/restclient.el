@@ -25,6 +25,11 @@
 (defvar rctest-output-buffer-name "*RestClient run all*"
   "The name fo the output buffer with run all results")
 
+(defvar rctest--failed-client-asertions nil
+  "A list of client specified assertiosn that failed on the last request")
+
+(defvar rctest--num-assertions-registered 0
+  "The number of client assertions registered for the current request")
 
 (defun rctest--request-props ()
   "Get an alist of all the 'Tag: value' entries on comments preceeding point"
@@ -37,6 +42,7 @@
       props)))
 
 (defun rctest--all-request-pos ()
+  "return a list of buffer positions with restcleint requests"
   (save-excursion
     (goto-char (point-min))
     (let (matches)
@@ -66,7 +72,21 @@
 
 (defun rctest--update-data-on-end (a-request)
   (map-put a-request 'response-body (buffer-string))
+  (map-put a-request 'response-status (save-excursion
+					(goto-char (point-min))
+					(and (re-search-forward "\\b\\([0-9]\\{3\\}\\)\\b" (line-end-position 2) nil)
+					     (string-to-number (match-string 1)))))
   a-request)
+
+(defun rctest--add-request-status (request-data)
+  (let* ((status (or (cdr (assoc 'response-status request-data)) 0))
+	 (request-failed  (or rctest--failed-client-asertions
+			      (and (= 0 rctest--num-assertions-registered)
+				   (not (<= 200 status 299))))))
+    (map-put request-data 'request-failed request-failed)
+    (map-put request-data 'num-assertions rctest--num-assertions-registered)
+    (map-put request-data 'failed-assertions rctest--failed-client-asertions)
+    request-data))
 
 (defun rctest--http-send-current-sync ()
    (restclient-http-send-current nil t)
@@ -77,6 +97,7 @@
 (defun rctest--init-output-buffer (num-requests)
   (save-excursion    
     (with-current-buffer (get-buffer-create rctest-output-buffer-name)
+      (read-only-mode -1)
       (erase-buffer)
       (goto-char (point-min))
       (insert (format "Restclient run all output [0/%d]\n" num-requests))
@@ -93,7 +114,7 @@
   (cl-flet ((r-data (k) (cdr (assoc k request-data))))
    (with-current-buffer rctest-output-buffer-name
      (goto-char (point-max))
-     (insert (format "\n* %s\n" (r-data 'name)))
+     (insert (format "\n* [%s] %s\n" (if (r-data 'request-failed) "ERROR" "SUCCESS" ) (r-data 'name)))
 
      (insert "** Request\n")
      (insert (r-data 'request) "\n")
@@ -107,6 +128,7 @@
      (insert "** Response\n" (r-data 'response-body))
      (outline-hide-sublevels 1))))
 
+
 (defun rctest-run-all ()
   (interactive)
   (let* ((request-positions (rctest--all-request-pos))
@@ -116,28 +138,52 @@
 			 (setq request-data
 			       (rctest--update-data-on-start request-data))))
 	 (end-lambda (lambda ()
-		       (setq request-data (rctest--update-data-on-end request-data)))))
+		       (setq request-data (rctest--update-data-on-end request-data)))))    
     (add-hook 'restclient-http-do-hook start-lambda)
     (add-hook 'restclient-response-received-hook end-lambda)
+    (setq rctest--failed-client-asertions nil)
+    (setq rctest--num-assertions-registered 0)
 
     (rctest--init-output-buffer (length request-positions))
     (dolist (req-pos request-positions)
       (goto-char req-pos)
       (setq request-data (rctest--new--request-data (current-buffer) req-pos))
       (rctest--http-send-current-sync)
+      (setq request-data (rctest--add-request-status request-data))
       (rctest--display-result request-data)
       (rctest--inc-completed-requests))
     
     (remove-hook 'restclient-http-do-hook start-lambda)
     (remove-hook 'restclient-response-received-hook end-lambda)
+    (with-current-buffer rctest-output-buffer-name
+	(read-only-mode 1))
     nil))
 
-;; (defvar mtest)
-;; (setq mtest (with-current-buffer "testing"  (rctest-run-all)))
-;; (last mtest)
-;; (mapcar (lambda (v) (cdr (assoc 'request-headers v))) mtest)
 
-;;(with-current-buffer "testing"  (first (rctest-run-all)))
+;; support for client assertions on responses
+(defun rctest--assert-result-function (args offset)
+  (goto-char offset)
+  (lexical-let ((form (read (current-buffer))))
+    (incf rctest--num-assertions-registered)
+    (lambda ()
+      (condition-case
+	  ;; TODO - rctest--failed-client-asertions doesnt seem to be changing
+	  (when (not (eval form))
+	    (setq rctest--failed-client-asertions (push form rctest--failed-client-asertions)))
+	  (error (setq rctest--failed-client-asertions (push form rctest--failed-client-asertions)))))))
+
+
+;; (defun rctest--assert-status (args offset)
+;;   (goto-char offset)
+;;   (lexical-let ((desired-status (string-to-number args)))
+;;     (incf rctest--num-assertions-registered)
+;;     (lambda ()
+;;       (when (not (equal desired-status (TODO 'get-request-status-here) ) )))))
+
+(resetclient-register-result-func
+      "assert" #'rctest--assert-result-function
+      "Use an elisep expression to test the success of a request. 
+return values of nil or erorrs will be treated as failures")
 
 (provide 'restclient-testing)
 
