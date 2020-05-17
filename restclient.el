@@ -471,8 +471,8 @@ The buffer contains the raw HTTP response sent by the server."
        (message "Unknown restclient hook type %s" ,cb-type))))
 
 (defun resetclient-register-result-func (name creation-func description)
-  (let ((new-cell (cons name (cons creation-func description))))
-    (setq restclient-result-handlers (cons new-cell restclient-result-handlers))))
+  (add-to-list 'restclient-result-handlers
+	       (cons name (cons creation-func description))))
 
 (defun restclient-remove-var (var-name)
   (setq restclient-var-overrides (assoc-delete-all var-name restclient-var-overrides)))

@@ -89,7 +89,8 @@
     request-data))
 
 (defun rctest--http-send-current-sync ()
-   (restclient-http-send-current nil t)
+  (save-window-excursion
+   (restclient-http-send-current nil t))
    (while restclient-within-call
      (sit-for 0.05)))
 
@@ -116,6 +117,12 @@
      (goto-char (point-max))
      (insert (format "\n* [%s] %s\n" (if (r-data 'request-failed) "ERROR" "SUCCESS" ) (r-data 'name)))
 
+     (when (r-data 'request-failed)
+       (insert "** Failed Assertions\n")
+       (dolist (a (r-data 'failed-assertions))
+	 (insert " - " (prin1-to-string a) "\n"))
+       (insert "\n"))
+     
      (insert "** Request\n")
      (insert (r-data 'request) "\n")
      (when-let ((hdrs (r-data 'request-headers)))
@@ -133,6 +140,7 @@
   (interactive)
   (let* ((request-positions (rctest--all-request-pos))
 	 (num-requests (length request-positions))
+	 (num-failed-requests 0)
 	 request-data
 	 (start-lambda (lambda ()
 			 (setq request-data
@@ -141,22 +149,34 @@
 		       (setq request-data (rctest--update-data-on-end request-data)))))    
     (add-hook 'restclient-http-do-hook start-lambda)
     (add-hook 'restclient-response-received-hook end-lambda)
+    
     (setq rctest--failed-client-asertions nil)
     (setq rctest--num-assertions-registered 0)
 
-    (rctest--init-output-buffer (length request-positions))
+    (rctest--init-output-buffer num-requests)
     (dolist (req-pos request-positions)
       (goto-char req-pos)
       (setq request-data (rctest--new--request-data (current-buffer) req-pos))
       (rctest--http-send-current-sync)
       (setq request-data (rctest--add-request-status request-data))
+      (when (cdr (assoc 'request-failed request-data))
+	(incf num-failed-requests))
       (rctest--display-result request-data)
       (rctest--inc-completed-requests))
     
+    (with-current-buffer rctest-output-buffer-name
+      (goto-char (point-min))
+      (forward-line)
+      (insert (format "\nCompleted %d Failed, %d successful requests\n" num-failed-requests num-requests))
+      (read-only-mode 1)
+      (restclient-response-mode t))
+    
+    (display-buffer rctest-output-buffer-name)
+
     (remove-hook 'restclient-http-do-hook start-lambda)
     (remove-hook 'restclient-response-received-hook end-lambda)
-    (with-current-buffer rctest-output-buffer-name
-	(read-only-mode 1))
+
+    
     nil))
 
 
@@ -166,32 +186,20 @@
   (lexical-let ((form (read (current-buffer))))
     (incf rctest--num-assertions-registered)
     (lambda ()
-      (condition-case
-	  ;; TODO - rctest--failed-client-asertions doesnt seem to be changing
+      (condition-case nil
 	  (when (not (eval form))
 	    (setq rctest--failed-client-asertions (push form rctest--failed-client-asertions)))
-	  (error (setq rctest--failed-client-asertions (push form rctest--failed-client-asertions)))))))
+	(error
+	 (setq rctest--failed-client-asertions (push form rctest--failed-client-asertions)))))))
 
 
-;; (defun rctest--assert-status (args offset)
-;;   (goto-char offset)
-;;   (lexical-let ((desired-status (string-to-number args)))
-;;     (incf rctest--num-assertions-registered)
-;;     (lambda ()
-;;       (when (not (equal desired-status (TODO 'get-request-status-here) ) )))))
-
-(resetclient-register-result-func
-      "assert" #'rctest--assert-result-function
-      "Use an elisep expression to test the success of a request. 
-return values of nil or erorrs will be treated as failures")
 
 (provide 'restclient-testing)
 
 (eval-after-load 'restclient
   '(progn
-     ;; (resetclient-register-result-func
-     ;;  "jq-set-var" #'restclient-json-var-function
-     ;;  "Set a resetclient variable with the value jq expression, 
-     ;;   takes var & jq expression as args. 
-     ;;   eg. -> jq-set-var :my-token .token")
-     (define-key restclient-response-mode-map  (kbd "C-c C-r") #'rctest-run-all)))
+     (resetclient-register-result-func
+      "assert" #'rctest--assert-result-function
+      "Use an elisep expression to test the success of a request. 
+return values of nil or erorrs will be treated as failures")     
+     (define-key restclient-mode-map  (kbd "C-c C-r") #'rctest-run-all)))
